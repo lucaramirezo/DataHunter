@@ -1,7 +1,11 @@
+import os
+import json
 import pickle as pkl
+import re
+from time import time
+from bs4 import BeautifulSoup
 from argparse import Namespace
 from dataclasses import dataclass, field
-from time import time
 from typing import Dict, List
 
 
@@ -51,9 +55,11 @@ class Stats:
 
     def __str__(self) -> str:
         return (
-            f"Words: {self.n_words}\n"
-            f"Docs: {self.n_docs}\n"
-            f"Time: {self.building_time}"
+            f"\nEstadísticas del Indexador:\n"
+            f"--------------------------\n"
+            f"Número de documentos indexados: {self.n_docs}\n"
+            f"Número de palabras únicas en el índice: {self.n_words}\n"
+            f"Tiempo de construcción: {self.building_time:.2f} segundos\n"
         )
 
 
@@ -82,7 +88,35 @@ class Indexer:
         """
         # Indexing
         ts = time()
-        ...
+
+        for i, filename in enumerate(os.listdir(self.args.input_folder)):
+            if filename.endswith(".json"):
+                with open(os.path.join(self.args.input_folder, filename), "r", encoding="utf-8") as f:
+                    data = json.load(f)
+
+                    # Extraer y procesar el contenido
+                    text = self.parse(data.get("text", ""))
+                    text = self.remove_split_symbols(text)
+                    text = self.remove_punctuation(text)
+                    text = self.remove_elongated_spaces(text)
+                    words = self.tokenize(text)
+                    words = self.remove_stopwords(words)
+
+                    # Crear el objeto Document
+                    document = Document(
+                        id=i,
+                        title=self.get_title(data.get("text", "")),
+                        url=data["url"],
+                        text=text
+                    )
+                    self.index.documents.append(document)
+
+                    # Actualizar las posting lists
+                    for word in set(words):
+                        if word not in self.index.postings:
+                            self.index.postings[word] = []
+                        self.index.postings[word].append(document.id)
+
         te = time()
 
         # Save index
@@ -102,7 +136,18 @@ class Indexer:
         Returns:
             str: texto parseado
         """
-        ...
+        soup = BeautifulSoup(text, "html.parser")
+        page_div = soup.find("div", class_="page")
+        if not page_div:
+            return ""
+
+        # Extraer texto de los tags relevantes dentro del bloque
+        raw_texts = []
+        for tag in page_div.find_all(["h1", "h2", "h3", "b", "i", "p", "a"]):
+            if tag.text:
+                raw_texts.append(tag.text.strip())
+
+        return " ".join(raw_texts).lower()
 
     def tokenize(self, text: str) -> List[str]:
         """Método para tokenizar un texto. Esto es, convertir
@@ -115,7 +160,7 @@ class Indexer:
         Returns:
             List[str]: lista de palabras del documento
         """
-        ...
+        return re.findall(r'\b\w+\b', text)
 
     def remove_stopwords(self, words: List[str]) -> List[str]:
         """Método para eliminar stopwords después del tokenizado.
@@ -126,7 +171,11 @@ class Indexer:
         Returns:
             List[str]: lista de palabras del documento, sin stopwords
         """
-        ...
+        stopwords = {
+            "el", "la", "los", "las", "de", "y", "a", "en", "un", "una",
+            "por", "con", "para", "que", "es", "del", "al", "se", "sus"
+        }
+        return [word for word in words if word not in stopwords]
 
     def remove_punctuation(self, text: str) -> str:
         """Método para eliminar signos de puntuación de un texto:
@@ -137,7 +186,7 @@ class Indexer:
         Returns:
             str: texto del documento sin signos de puntuación.
         """
-        ...
+        return re.sub(r'[<>¿?,;:.()\[\]"\'¡!]', "", text)
 
     def remove_elongated_spaces(self, text: str) -> str:
         """Método para eliminar espacios duplicados.
@@ -160,6 +209,12 @@ class Indexer:
             str: texto sin símbolos separadores
         """
         return text.replace("\n", " ").replace("\t", " ").replace("\r", " ")
+
+    def get_title(self, html: str) -> str:
+        """Extrae el título de la página web."""
+        soup = BeautifulSoup(html, "html.parser")
+        title_tag = soup.find("title")
+        return title_tag.text.strip() if title_tag else "Sin título"
 
     def show_stats(self, building_time: float) -> None:
         self.stats.building_time = building_time

@@ -41,4 +41,8 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     crawler = Crawler(args)
-    crawler.crawl()
+    results = crawler.crawl()
+    print("\nPáginas Crawleadas:")
+    for page in results:
+        print(f"URL: {page['url']}")
+        print(f"Content: {page['text'][:200]}...\n")

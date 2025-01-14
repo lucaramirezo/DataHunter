@@ -1,39 +1,55 @@
+import os
+import json
 import requests
-from bs4 import BeautifulSoup
+import re
 from queue import Queue
-from typing import Set
+from bs4 import BeautifulSoup
 from argparse import Namespace
 
 
 class Crawler:
-    """Clase que representa un Crawler"""
+    """Clase que representa un Crawler."""
 
     def __init__(self, args: Namespace):
         self.url = args.url
         self.max_webs = args.max_webs
         self.output_folder = args.output_folder
-        self.visited = set()  # URLs visitadas
-        self.queue = Queue()  # Cola de URLs por visitar
+        self.visited = set()
+        self.queue = Queue()
 
-    def crawl(self) -> None:
-        """Método para rastrear páginas web."""
+    def crawl(self) -> list:
+        """Método para rastrear páginas web y devolver resultados."""
+        os.makedirs(self.output_folder, exist_ok=True)
         self.queue.put(self.url)
+        pages = []  # Lista para almacenar los resultados
+
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36"
+            )
+        }
 
         while not self.queue.empty() and len(self.visited) < self.max_webs:
             current_url = self.queue.get()
 
-            # Evitar procesar URLs repetidas
             if current_url in self.visited:
                 continue
 
             try:
-                response = requests.get(current_url, timeout=10)
-                response.raise_for_status()  # Manejar errores HTTP
+                # Solicitud con cabecera User-Agent
+                response = requests.get(current_url, headers=headers, timeout=10)
+                response.raise_for_status()
 
-                # Almacenar contenido en archivo JSON
+                # Almacenar el contenido y añadir a la lista
+                page_data = {
+                    "url": current_url,
+                    "text": response.text
+                }
+                pages.append(page_data)
                 self.save_page(current_url, response.text)
 
-                # Extraer y añadir nuevas URLs a la cola
+                # Extraer nuevas URLs y añadirlas a la cola
                 urls = self.find_urls(response.text)
                 for url in urls:
                     if url not in self.visited:
@@ -43,10 +59,13 @@ class Crawler:
             except requests.RequestException as e:
                 print(f"Error al procesar {current_url}: {e}")
 
-    def find_urls(self, text: str) -> Set[str]:
-        """Encuentra URLs de la Universidad Europea en el texto."""
-        soup = BeautifulSoup(text, "html.parser")
+        return pages
+
+
+    def find_urls(self, text: str) -> set:
+        """Encuentra URLs del dominio 'https://universidadeuropea.com'."""
         urls = set()
+        soup = BeautifulSoup(text, "html.parser")
         for a_tag in soup.find_all("a", href=True):
             href = a_tag["href"]
             if href.startswith("https://universidadeuropea.com"):
@@ -55,7 +74,6 @@ class Crawler:
 
     def save_page(self, url: str, text: str) -> None:
         """Guarda el contenido de la página en un archivo JSON."""
-        os.makedirs(self.output_folder, exist_ok=True)
         filename = os.path.join(self.output_folder, f"{len(self.visited)}.json")
         with open(filename, "w", encoding="utf-8") as f:
             json.dump({"url": url, "text": text}, f, ensure_ascii=False, indent=4)
