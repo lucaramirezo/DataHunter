@@ -4,6 +4,8 @@ import pickle as pkl
 import re
 from time import time
 from bs4 import BeautifulSoup
+from nltk.corpus import stopwords
+import nltk
 from argparse import Namespace
 from dataclasses import dataclass, field
 from typing import Dict, List
