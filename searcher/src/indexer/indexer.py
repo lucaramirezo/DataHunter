@@ -41,6 +41,8 @@ class Index:
     postings: Dict[str, List[int]] = field(default_factory=lambda: {})
     documents: List[Document] = field(default_factory=lambda: [])
 
+
+
     def save(self, output_name: str) -> None:
         """Serializa el índice (`self`) en formato binario usando Pickle"""
         with open(output_name, "wb") as fw:
@@ -72,6 +74,10 @@ class Indexer:
         self.args = args
         self.index = Index()
         self.stats = Stats()
+
+        # Descargar stopwords en el constructor
+        nltk.download('stopwords', quiet=True)
+        self.stopwords = set(stopwords.words('spanish'))
 
     def build_index(self) -> None:
         """Método para construir un índice.
@@ -173,11 +179,7 @@ class Indexer:
         Returns:
             List[str]: lista de palabras del documento, sin stopwords
         """
-        stopwords = {
-            "el", "la", "los", "las", "de", "y", "a", "en", "un", "una",
-            "por", "con", "para", "que", "es", "del", "al", "se", "sus"
-        }
-        return [word for word in words if word not in stopwords]
+        return [word for word in words if word not in self.stopwords]
 
     def remove_punctuation(self, text: str) -> str:
         """Método para eliminar signos de puntuación de un texto:
