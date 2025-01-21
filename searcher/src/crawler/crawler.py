@@ -19,6 +19,8 @@ class Crawler:
 
     def crawl(self) -> list:
         """Método para rastrear páginas web y devolver resultados."""
+        # Limpia la carpeta de salida antes de comenzar
+        self.clean_output_folder()
         os.makedirs(self.output_folder, exist_ok=True)
         self.queue.put(self.url)
         pages = []  # Lista para almacenar los resultados
@@ -60,6 +62,17 @@ class Crawler:
                 print(f"Error al procesar {current_url}: {e}")
 
         return pages
+
+    def clean_output_folder(self):
+        """Limpia la carpeta de salida eliminando todos los archivos."""
+        if os.path.exists(self.output_folder):
+            for filename in os.listdir(self.output_folder):
+                file_path = os.path.join(self.output_folder, filename)
+                try:
+                    if os.path.isfile(file_path):
+                        os.unlink(file_path)
+                except Exception as e:
+                    print(f"Error al eliminar {file_path}: {e}")
 
 
     def find_urls(self, text: str) -> set:

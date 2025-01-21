@@ -4,7 +4,9 @@ from argparse import Namespace
 from dataclasses import dataclass
 from time import time
 from typing import Dict, List
-
+from math import log, sqrt
+from numpy import dot
+from numpy.linalg import norm
 from ..indexer.indexer import Index
 
 
@@ -26,7 +28,6 @@ class Retriever:
         self.args = args
         self.index = self.load_index()
 
-    import unicodedata
 
     def normalize(self, text: str) -> str:
         """Elimina acentos y convierte el texto a minúsculas."""
@@ -34,11 +35,73 @@ class Retriever:
         text = "".join(c for c in text if unicodedata.category(c) != "Mn")
         return text.lower()
 
+    def score(self, query: str, doc_id: int) -> float:
+        query_terms = self.normalize(query).split()
+        doc_tokens = self.index.documents[doc_id].tokens  # Usar tokens preprocesados
+
+        all_terms = set(query_terms + doc_tokens)
+        query_vector = []
+        doc_vector = []
+
+        for term in all_terms:
+            tf_query = query_terms.count(term)
+            tf_query = 1 + log(tf_query) if tf_query > 0 else 0
+            idf = log((1 + len(self.index.documents)) / (1 + len(self.index.postings.get(term, [])))) + 1
+            query_vector.append(tf_query * idf)
+
+            tf_doc = doc_tokens.count(term)
+            tf_doc = 1 + log(tf_doc) if tf_doc > 0 else 0
+            doc_vector.append(tf_doc * idf)
+
+        query_norm = norm(query_vector)
+        doc_norm = norm(doc_vector)
+        if query_norm == 0 or doc_norm == 0:
+            return 0.0
+        return dot(query_vector, doc_vector) / (query_norm * doc_norm)
+
+    def rank_results(self, query: str, doc_ids: List[int], top_n: int = 10) -> List[Result]:
+        """Ordena los resultados por relevancia utilizando similitud del coseno.
+
+        Args:
+            query (str): Consulta.
+            doc_ids (List[int]): Lista de IDs de documentos relevantes.
+            top_n (int): Número máximo de resultados a devolver.
+
+        Returns:
+            List[Result]: Resultados ordenados por puntuación.
+        """
+        print("Iniciando ranking de resultados...")  # Depuración
+        scored_results = []
+        for doc_id in doc_ids:
+            score = self.score(query, doc_id)
+            print(f"Doc ID: {doc_id}, Puntaje: {score}")  # Depuración
+            if score > 0:  # Solo incluir documentos con puntaje positivo
+                snippet = self.index.documents[doc_id].text[:200]  # Seleccionar primer fragmento
+                scored_results.append((score, Result(
+                    url=self.index.documents[doc_id].url,
+                    snippet=snippet
+                )))
+
+        # Ordenar por puntuación descendente
+        scored_results.sort(key=lambda x: x[0], reverse=True)
+
+        if not scored_results:
+            print("No hay documentos relevantes después del ranking.")  # Depuración
+
+        return [result for _, result in scored_results[:top_n]]
+
     def search_query(self, query: str) -> List[Result]:
-        """Resuelve una consulta lógica respetando la precedencia de operadores."""
+        """Resuelve una consulta lógica procesando de izquierda a derecha, respetando la precedencia.
+
+        Args:
+            query (str): Consulta a resolver.
+
+        Returns:
+            List[Result]: Resultados relevantes con sus URLs y fragmentos ordenados.
+        """
 
         def precedence(op: str) -> int:
-            """Devuelve la precedencia de los operadores lógicos."""
+            """Devuelve precedencia de operadores."""
             if op == "NOT":
                 return 3
             elif op == "AND":
@@ -47,53 +110,69 @@ class Retriever:
                 return 1
             return 0
 
-        def apply_operator(operators: List[str], operands: List[List[int]]):
-            """Aplica un operador lógico a las listas de posting lists en la pila."""
-            operator = operators.pop()
+        def apply_operator(operator: str, posting_a: List[int], posting_b: List[int] = None) -> List[int]:
+            """Aplica el operador lógico a las posting lists."""
             if operator == "NOT":
-                posting_a = operands.pop()
-                operands.append(self._not_(posting_a))
-            else:
-                posting_b = operands.pop()
-                posting_a = operands.pop()
-                if operator == "AND":
-                    operands.append(self._and_(posting_a, posting_b))
-                elif operator == "OR":
-                    operands.append(self._or_(posting_a, posting_b))
+                return self._not_(posting_a)
+            elif operator == "AND":
+                return self._and_(posting_a, posting_b)
+            elif operator == "OR":
+                return self._or_(posting_a, posting_b)
+            return []
 
         terms = query.split()
-        operators = []  # Pila de operadores lógicos
-        operands = []  # Pila de posting lists
+        operands = []
+        operators = []
+
+        print(f"Procesando consulta: '{query}'")  # Depuración
 
         for term in terms:
             if term in ["AND", "OR", "NOT"]:
                 while operators and precedence(operators[-1]) >= precedence(term):
-                    apply_operator(operators, operands)
+                    operator = operators.pop()
+                    if operator == "NOT":
+                        posting_a = operands.pop()
+                        result = apply_operator(operator, posting_a)
+                    else:
+                        posting_b = operands.pop()
+                        posting_a = operands.pop()
+                        result = apply_operator(operator, posting_a, posting_b)
+                    print(f"Aplicando operador {operator}: {result}")  # Depuración
+                    operands.append(result)
                 operators.append(term)
             else:
-                posting_list = self.index.postings.get(self.normalize(term), [])
-                print(f"Posting list para '{term}': {posting_list}")  # Depuración
+                normalized_term = self.normalize(term)
+                posting_list = self.index.postings.get(normalized_term, [])
+                print(f"Término: '{term}' (normalizado: '{normalized_term}'), Posting List: {posting_list}")
                 operands.append(posting_list)
 
+        # Procesar operadores restantes
         while operators:
-            apply_operator(operators, operands)
+            operator = operators.pop()
+            if operator == "NOT":
+                posting_a = operands.pop()
+                result = apply_operator(operator, posting_a)
+            else:
+                posting_b = operands.pop()
+                posting_a = operands.pop()
+                result = apply_operator(operator, posting_a, posting_b)
+            print(f"Aplicando operador {operator}: {result}")  # Depuración
+            operands.append(result)
 
         final_posting_list = operands.pop() if operands else []
+        print(f"Posting List Final: {final_posting_list}")  # Depuración
 
-        results = []
-        for doc_id in final_posting_list:
-            document = self.index.documents[doc_id]
-            snippet = document.text[:200]
-            results.append(Result(url=document.url, snippet=snippet))
+        if not final_posting_list:
+            print("No se encontraron documentos relevantes para la consulta.")
+            return []
 
-        if not results:
-            print(f"No se encontraron resultados para la consulta '{query}'.")
-        else:
-            print(f"\nResultados para la consulta '{query}':")
-            for result in results:
-                print(result)
+        # Aplicar ranking por relevancia
+        ranked_results = self.rank_results(query, final_posting_list)
+        print("\nResultados ordenados por relevancia:")
+        for result in ranked_results:
+            print(result)
 
-        return results
+        return ranked_results
 
     def search_from_file(self, fname: str) -> Dict[str, List[Result]]:
         """Método para hacer consultas desde fichero.
@@ -119,7 +198,6 @@ class Retriever:
         return results
 
     def load_index(self) -> Index:
-        """Método para cargar un índice invertido desde disco."""
         with open(self.args.index_file, "rb") as fr:
             return pkl.load(fr)
 

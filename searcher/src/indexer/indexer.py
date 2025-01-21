@@ -3,6 +3,8 @@ import json
 import pickle as pkl
 import re
 from time import time
+
+import unicodedata
 from bs4 import BeautifulSoup
 from nltk.corpus import stopwords
 import nltk
@@ -19,12 +21,14 @@ class Document:
         - title: título del documento.
         - url: URL del documento.
         - text: texto del documento, parseado y limpio.
+        - tokens
     """
 
     id: int
     title: str
     url: str
     text: str
+    tokens: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -80,21 +84,6 @@ class Indexer:
         self.stopwords = set(stopwords.words('spanish'))
 
     def build_index(self) -> None:
-        """Método para construir un índice.
-        El método debe iterar sobre los ficheros .json creados por el crawler.
-        Para cada fichero, debe crear y añadir un nuevo `Document` a la lista
-        `documents`, al que se le asigna un id entero secuencial, su título
-        (se puede extraer de <title>), su URL y el texto del documento
-        (contenido parseado y limpio). Al mismo tiempo, debe ir actualizando
-        las posting lists. Esto es, dado un documento, tras parsearlo,
-        limpiarlo y tokenizarlo, se añadirá el id del documento a la posting
-        list de cada palabra en dicho documento. Al final, almacenará el objeto
-        Index en disco como un fichero binario.
-
-        [Nota] El indexador no debe distinguir entre mayúsculas y minúsculas, por
-        lo que deberás convertir todo el texto a minúsculas desde el principio.
-        """
-        # Indexing
         ts = time()
 
         for i, filename in enumerate(os.listdir(self.args.input_folder)):
@@ -102,7 +91,7 @@ class Indexer:
                 with open(os.path.join(self.args.input_folder, filename), "r", encoding="utf-8") as f:
                     data = json.load(f)
 
-                    # Extraer y procesar el contenido
+                    # Procesar contenido del documento
                     text = self.parse(data.get("text", ""))
                     text = self.remove_split_symbols(text)
                     text = self.remove_punctuation(text)
@@ -110,16 +99,17 @@ class Indexer:
                     words = self.tokenize(text)
                     words = self.remove_stopwords(words)
 
-                    # Crear el objeto Document
+                    # Crear el objeto Document con tokens
                     document = Document(
                         id=i,
                         title=self.get_title(data.get("text", "")),
                         url=data["url"],
-                        text=text
+                        text=text,
+                        tokens=words  # Guardar los tokens preprocesados
                     )
                     self.index.documents.append(document)
 
-                    # Actualizar las posting lists
+                    # Actualizar posting lists
                     for word in set(words):
                         if word not in self.index.postings:
                             self.index.postings[word] = []
@@ -127,10 +117,10 @@ class Indexer:
 
         te = time()
 
-        # Save index
+        # Guardar el índice
         self.index.save(self.args.output_name)
 
-        # Show stats
+        # Mostrar estadísticas
         self.show_stats(building_time=te - ts)
 
     def parse(self, text: str) -> str:
@@ -157,6 +147,18 @@ class Indexer:
 
         return " ".join(raw_texts).lower()
 
+    def normalize(self, text: str) -> str:
+        """Elimina acentos y convierte el texto a minúsculas.
+
+        Args:
+            text (str): Texto a normalizar.
+        Returns:
+            str: Texto normalizado.
+        """
+        text = unicodedata.normalize("NFD", text)
+        text = "".join(c for c in text if unicodedata.category(c) != "Mn")
+        return text.lower()
+
     def tokenize(self, text: str) -> List[str]:
         """Método para tokenizar un texto. Esto es, convertir
         un texto a una lista de palabras. Puedes utilizar tokenizers
@@ -168,6 +170,7 @@ class Indexer:
         Returns:
             List[str]: lista de palabras del documento
         """
+        text = self.normalize(text)
         return re.findall(r'\b\w+\b', text)
 
     def remove_stopwords(self, words: List[str]) -> List[str]:
