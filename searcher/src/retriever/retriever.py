@@ -3,6 +3,7 @@ import unicodedata
 from argparse import Namespace
 from dataclasses import dataclass
 from time import time
+import re
 from typing import Dict, List
 from math import log, sqrt
 from numpy import dot
@@ -91,7 +92,7 @@ class Retriever:
         return [result for _, result in scored_results[:top_n]]
 
     def search_query(self, query: str) -> List[Result]:
-        """Resuelve una consulta lógica procesando de izquierda a derecha, respetando la precedencia.
+        """Resuelve una consulta lógica procesando operadores y paréntesis.
 
         Args:
             query (str): Consulta a resolver.
@@ -110,55 +111,53 @@ class Retriever:
                 return 1
             return 0
 
-        def apply_operator(operator: str, posting_a: List[int], posting_b: List[int] = None) -> List[int]:
-            """Aplica el operador lógico a las posting lists."""
-            if operator == "NOT":
-                return self._not_(posting_a)
-            elif operator == "AND":
-                return self._and_(posting_a, posting_b)
-            elif operator == "OR":
-                return self._or_(posting_a, posting_b)
-            return []
-
-        terms = query.split()
-        operands = []
-        operators = []
-
-        print(f"Procesando consulta: '{query}'")  # Depuración
-
-        for term in terms:
-            if term in ["AND", "OR", "NOT"]:
-                while operators and precedence(operators[-1]) >= precedence(term):
-                    operator = operators.pop()
-                    if operator == "NOT":
-                        posting_a = operands.pop()
-                        result = apply_operator(operator, posting_a)
-                    else:
-                        posting_b = operands.pop()
-                        posting_a = operands.pop()
-                        result = apply_operator(operator, posting_a, posting_b)
-                    print(f"Aplicando operador {operator}: {result}")  # Depuración
-                    operands.append(result)
-                operators.append(term)
-            else:
-                normalized_term = self.normalize(term)
-                posting_list = self.index.postings.get(normalized_term, [])
-                print(f"Término: '{term}' (normalizado: '{normalized_term}'), Posting List: {posting_list}")
-                operands.append(posting_list)
-
-        # Procesar operadores restantes
-        while operators:
+        def apply_operator(operators: List[str], operands: List[List[int]]):
+            """Aplica un operador lógico a las listas de posting lists en la pila."""
             operator = operators.pop()
             if operator == "NOT":
                 posting_a = operands.pop()
-                result = apply_operator(operator, posting_a)
+                operands.append(self._not_(posting_a))
             else:
                 posting_b = operands.pop()
                 posting_a = operands.pop()
-                result = apply_operator(operator, posting_a, posting_b)
-            print(f"Aplicando operador {operator}: {result}")  # Depuración
-            operands.append(result)
+                if operator == "AND":
+                    operands.append(self._and_(posting_a, posting_b))
+                elif operator == "OR":
+                    operands.append(self._or_(posting_a, posting_b))
 
+        # Tokenizar términos y operadores, incluyendo paréntesis para busquedas parentizadas
+        tokens = re.findall(r'\(|\)|AND|OR|NOT|\w+', query)
+
+        operators = []
+        operands = []
+
+        print(f"Procesando consulta: '{query}'")  # Depuración
+
+        for token in tokens:
+            if token == "(":
+                operators.append(token)
+            elif token == ")":
+                # Resolver hasta encontrar el paréntesis de apertura
+                while operators and operators[-1] != "(":
+                    apply_operator(operators, operands)
+                operators.pop()  # Eliminar el paréntesis de apertura
+            elif token in ["AND", "OR", "NOT"]:
+                # Resolver operadores de mayor o igual precedencia
+                while operators and operators[-1] != "(" and precedence(operators[-1]) >= precedence(token):
+                    apply_operator(operators, operands)
+                operators.append(token)
+            else:
+                # Término de consulta: buscar su posting list
+                normalized_term = self.normalize(token)
+                posting_list = self.index.postings.get(normalized_term, [])
+                print(f"Término: '{token}' (normalizado: '{normalized_term}'), Posting List: {posting_list}")
+                operands.append(posting_list)
+
+        # Resolver operadores restantes
+        while operators:
+            apply_operator(operators, operands)
+
+        # La última posting list en operandos es el resultado final
         final_posting_list = operands.pop() if operands else []
         print(f"Posting List Final: {final_posting_list}")  # Depuración
 
