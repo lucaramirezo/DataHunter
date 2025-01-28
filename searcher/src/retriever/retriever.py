@@ -8,6 +8,8 @@ from typing import Dict, List
 from math import log, sqrt
 from numpy import dot
 from numpy.linalg import norm
+from sklearn.metrics.pairwise import cosine_similarity
+from sentence_transformers import SentenceTransformer
 from ..indexer.indexer import Index
 
 
@@ -27,7 +29,10 @@ class Retriever:
 
     def __init__(self, args: Namespace):
         self.args = args
-        self.index = self.load_index()
+        self.index = None  # Inicializar como None
+        self.documents = None  # Para facilitar el acceso a documentos
+        self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')  # Inicializa el modelo de embeddings
+        self.load_index()  # Carga el índice y asigna los atributos necesarios
 
 
     def normalize(self, text: str) -> str:
@@ -35,6 +40,14 @@ class Retriever:
         text = unicodedata.normalize("NFD", text)
         text = "".join(c for c in text if unicodedata.category(c) != "Mn")
         return text.lower()
+
+    def calculate_embedding_score(self, query: str, doc_id: int) -> float:
+        """Calcula la similitud entre el embedding de la consulta y un documento."""
+        query_embedding = self.embedding_model.encode(query)
+        doc_embedding = self.documents[doc_id].embedding
+        return cosine_similarity([query_embedding], [doc_embedding])[0][0]
+
+    from numpy.linalg import norm
 
     def score(self, query: str, doc_id: int) -> float:
         query_terms = self.normalize(query).split()
@@ -60,22 +73,41 @@ class Retriever:
             return 0.0
         return dot(query_vector, doc_vector) / (query_norm * doc_norm)
 
-    def rank_results(self, query: str, doc_ids: List[int], top_n: int = 10) -> List[Result]:
-        """Ordena los resultados por relevancia utilizando similitud del coseno.
+    def combined_score(self, query: str, doc_id: int, alpha: float = 0.5) -> float:
+        """Combina los puntajes TF-IDF y embeddings en un único valor."""
+        tfidf_score = self.score(query, doc_id)
+        embedding_score = self.calculate_embedding_score(query, doc_id)
+        return alpha * tfidf_score + (1 - alpha) * embedding_score
+
+    def rank_results(self, query: str, doc_ids: List[int], top_n: int = 10, method: str = "combined",
+                     alpha: float = 0.5) -> List[Result]:
+        """Ordena los resultados por relevancia utilizando el método seleccionado.
 
         Args:
             query (str): Consulta.
             doc_ids (List[int]): Lista de IDs de documentos relevantes.
             top_n (int): Número máximo de resultados a devolver.
+            method (str): Método de ranking ("tfidf", "embedding", "combined").
+            alpha (float): Peso para el método combinado (solo aplica para "combined").
 
         Returns:
             List[Result]: Resultados ordenados por puntuación.
         """
         print("Iniciando ranking de resultados...")  # Depuración
         scored_results = []
+
         for doc_id in doc_ids:
-            score = self.score(query, doc_id)
+            if method == "tfidf":
+                score = self.score(query, doc_id)
+            elif method == "embedding":
+                score = self.calculate_embedding_score(query, doc_id)
+            elif method == "combined":
+                score = self.combined_score(query, doc_id, alpha)
+            else:
+                raise ValueError(f"Método de ranking desconocido: {method}")
+
             print(f"Doc ID: {doc_id}, Puntaje: {score}")  # Depuración
+
             if score > 0:  # Solo incluir documentos con puntaje positivo
                 snippet = self.index.documents[doc_id].text[:200]  # Seleccionar primer fragmento
                 scored_results.append((score, Result(
@@ -91,11 +123,13 @@ class Retriever:
 
         return [result for _, result in scored_results[:top_n]]
 
-    def search_query(self, query: str) -> List[Result]:
+    def search_query(self, query: str, method: str = "combined", alpha: float = 0.5) -> List[Result]:
         """Resuelve una consulta lógica procesando operadores y paréntesis.
 
         Args:
             query (str): Consulta a resolver.
+            method (str): Método de ranking ("tfidf", "embedding", "combined").
+            alpha (float): Peso del método combinado (solo aplica para "combined").
 
         Returns:
             List[Result]: Resultados relevantes con sus URLs y fragmentos ordenados.
@@ -114,35 +148,45 @@ class Retriever:
         def apply_operator(operators: List[str], operands: List[List[int]]):
             """Aplica un operador lógico a las listas de posting lists en la pila."""
             operator = operators.pop()
+            print(f"Aplicando operador: {operator}")  # Depuración
             if operator == "NOT":
                 posting_a = operands.pop()
-                operands.append(self._not_(posting_a))
+                print(f"Operando para NOT: {posting_a}")  # Depuración
+                result = self._not_(posting_a)
+                print(f"Resultado NOT: {result}")  # Depuración
+                operands.append(result)
             else:
                 posting_b = operands.pop()
                 posting_a = operands.pop()
+                print(f"Operandos para {operator}: {posting_a}, {posting_b}")  # Depuración
                 if operator == "AND":
-                    operands.append(self._and_(posting_a, posting_b))
+                    result = self._and_(posting_a, posting_b)
+                    print(f"Resultado AND: {result}")  # Depuración
                 elif operator == "OR":
-                    operands.append(self._or_(posting_a, posting_b))
+                    result = self._or_(posting_a, posting_b)
+                    print(f"Resultado OR: {result}")  # Depuración
+                operands.append(result)
 
-        # Tokenizar términos y operadores, incluyendo paréntesis para busquedas parentizadas
+        # Tokenizar términos y operadores, incluyendo paréntesis para búsquedas parentizadas
         tokens = re.findall(r'\(|\)|AND|OR|NOT|\w+', query)
 
         operators = []
         operands = []
 
         print(f"Procesando consulta: '{query}'")  # Depuración
+        print(f"Tokens identificados: {tokens}")  # Depuración
 
         for token in tokens:
             if token == "(":
+                print(f"Agregando paréntesis de apertura: {token}")  # Depuración
                 operators.append(token)
             elif token == ")":
-                # Resolver hasta encontrar el paréntesis de apertura
+                print(f"Procesando paréntesis de cierre: {token}")  # Depuración
                 while operators and operators[-1] != "(":
                     apply_operator(operators, operands)
                 operators.pop()  # Eliminar el paréntesis de apertura
             elif token in ["AND", "OR", "NOT"]:
-                # Resolver operadores de mayor o igual precedencia
+                print(f"Agregando operador lógico: {token}")  # Depuración
                 while operators and operators[-1] != "(" and precedence(operators[-1]) >= precedence(token):
                     apply_operator(operators, operands)
                 operators.append(token)
@@ -154,6 +198,7 @@ class Retriever:
                 operands.append(posting_list)
 
         # Resolver operadores restantes
+        print("Resolviendo operadores restantes...")  # Depuración
         while operators:
             apply_operator(operators, operands)
 
@@ -166,7 +211,9 @@ class Retriever:
             return []
 
         # Aplicar ranking por relevancia
-        ranked_results = self.rank_results(query, final_posting_list)
+        print("Iniciando proceso de ranking...")  # Depuración
+        ranked_results = self.rank_results(query, final_posting_list, method=method, alpha=alpha)
+
         print("\nResultados ordenados por relevancia:")
         for result in ranked_results:
             print(result)
@@ -196,9 +243,24 @@ class Retriever:
         print(f"Time to solve {len(queries)} queries: {te - ts:.2f} seconds")
         return results
 
-    def load_index(self) -> Index:
-        with open(self.args.index_file, "rb") as fr:
-            return pkl.load(fr)
+    def load_index(self):
+        """Carga el índice invertido y los embeddings."""
+        print(f"Cargando índice desde: {self.args.index_file}")  # Depuración
+        try:
+            with open(self.args.index_file, 'rb') as f:
+                self.index = pkl.load(f)
+        except FileNotFoundError:
+            raise ValueError(f"El archivo de índice {self.args.index_file} no existe.")
+        except Exception as e:
+            raise ValueError(f"Error al cargar el índice: {e}")
+
+        # Validar que el índice tiene los atributos esperados
+        if not hasattr(self.index, 'postings') or not hasattr(self.index, 'documents'):
+            raise ValueError("El índice cargado no tiene el formato esperado.")
+
+        self.documents = self.index.documents  # Asignar los documentos a un atributo separado
+        print(
+            f"Índice cargado con {len(self.documents)} documentos y {len(self.index.postings)} términos.")
 
     def _and_(self, posting_a: List[int], posting_b: List[int]) -> List[int]:
         """Método para calcular la intersección de dos posting lists.

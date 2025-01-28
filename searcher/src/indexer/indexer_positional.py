@@ -10,8 +10,7 @@ from nltk.corpus import stopwords
 import nltk
 from argparse import Namespace
 from dataclasses import dataclass, field
-from typing import Dict, List
-from sentence_transformers import SentenceTransformer
+from typing import Dict, List, Tuple
 
 
 @dataclass
@@ -30,7 +29,6 @@ class Document:
     url: str
     text: str
     tokens: List[str] = field(default_factory=list)
-    embedding: List[float] = field(default_factory=list)
 
 
 @dataclass
@@ -84,8 +82,6 @@ class Indexer:
         # Descargar stopwords en el constructor
         nltk.download('stopwords', quiet=True)
         self.stopwords = set(stopwords.words('spanish'))
-        # Inicializa el modelo de embeddings
-        self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
 
     def build_index(self) -> None:
         ts = time()
@@ -100,34 +96,31 @@ class Indexer:
                     text = self.remove_split_symbols(text)
                     text = self.remove_punctuation(text)
                     text = self.remove_elongated_spaces(text)
-                    words = self.tokenize(text)
-                    words = self.remove_stopwords(words)
-                    embedding = self.embedding_model.encode(text).tolist()
+                    tokens_with_positions = self.tokenize(text)
+                    tokens = [token for token, _ in tokens_with_positions]  # Extraer solo los tokens
 
-                    # Crear el objeto Document con tokens y embedding
+                    # Crear el objeto Document
                     document = Document(
                         id=i,
                         title=self.get_title(data.get("text", "")),
                         url=data["url"],
                         text=text,
-                        tokens=words,  # Guardar los tokens preprocesados
-                        embedding=embedding  # Guardar el embedding calculado
+                        tokens=tokens
                     )
                     self.index.documents.append(document)
 
-                    # Actualizar posting lists
-                    for word in set(words):
-                        if word not in self.index.postings:
-                            self.index.postings[word] = []
-                        self.index.postings[word].append(document.id)
+                    # Construir el índice invertido posicional
+                    for token, position in tokens_with_positions:
+                        if token not in self.index.postings:
+                            self.index.postings[token] = {}
+                        if i not in self.index.postings[token]:
+                            self.index.postings[token][i] = []
+                        self.index.postings[token][i].append(position)
 
         te = time()
-
-        # Guardar el índice
         self.index.save(self.args.output_name)
-
-        # Mostrar estadísticas
         self.show_stats(building_time=te - ts)
+
 
     def parse(self, text: str) -> str:
         """Método para extraer el texto de un documento.
@@ -165,19 +158,15 @@ class Indexer:
         text = "".join(c for c in text if unicodedata.category(c) != "Mn")
         return text.lower()
 
-    def tokenize(self, text: str) -> List[str]:
-        """Método para tokenizar un texto. Esto es, convertir
-        un texto a una lista de palabras. Puedes utilizar tokenizers
-        existentes en NLTK, Spacy, etc. O simplemente separar por
-        espacios en blanco.
-
-        Args:
-            text (str): text de un documento
-        Returns:
-            List[str]: lista de palabras del documento
-        """
+    def tokenize(self, text: str) -> List[Tuple[str, int]]:
+        """Tokeniza el texto y devuelve una lista de (término, posición)."""
         text = self.normalize(text)
-        return re.findall(r'\b\w+\b', text)
+        tokens_with_positions = []
+        for match in re.finditer(r'\b\w+\b', text):
+            token = match.group(0)
+            position = match.start()  # Inicio del término en el texto
+            tokens_with_positions.append((token, position))
+        return tokens_with_positions
 
     def remove_stopwords(self, words: List[str]) -> List[str]:
         """Método para eliminar stopwords después del tokenizado.
